@@ -102,50 +102,7 @@ def process_url_ingestion(self: Task, job_id: str, url: str) -> Dict:
             
         logger.info("Ingestion task completed", extra={"job_id": job_id})
         return result
-    except Exception as exc:  # pragma: no cover - top-level catch for robustness
-        tb = traceback.format_exc()
-        logger.error("Ingestion task failed", extra={"job_id": job_id, "error": str(exc), "traceback": tb})
-
-        # Attempt to mark job as failed
-        try:
-            update_job_status_sync(UUID(job_id), "failed", error_message=str(exc), error_traceback=tb)
-        except Exception as e2:
-            logger.error("Failed to persist job failure", extra={"job_id": job_id, "error": str(e2)})
-
-        # Decide whether to retry
-        retries = getattr(self.request, "retries", 0) if hasattr(self, "request") else 0
-        if retries < self.max_retries:
-            countdown = 60 * (2 ** retries)
-            logger.info("Retrying ingestion task", extra={"job_id": job_id, "countdown": countdown, "retries": retries})
-            raise self.retry(exc=exc, countdown=countdown)
-
-        # No more retries
-        raise
-
-        # 4. Embeddings (batch)
-        embedder = GeminiEmbeddings(api_key=settings.GOOGLE_API_KEY, model=settings.EMBEDDING_MODEL, output_dimensionality=settings.EMBEDDING_DIMENSIONS)
-        vectors: List[List[float]] = []
-        batch_size = 100
-        for i in range(0, len(chunks), batch_size):
-            batch = chunks[i : i + batch_size]
-            batch_vecs = embedder.embed_documents(batch)
-            vectors.extend(batch_vecs)
-
-        # 5. Qdrant upsert
-        store = QdrantStore(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT, collection_name=settings.QDRANT_COLLECTION)
-        store.create_collection_if_not_exists()
-        metadata = {"source_url": u}
-        added = store.add_documents(chunks=chunks, vectors=vectors, metadata=metadata, job_id=jid)
-
-        # 6. Completed
-        update_job_status_sync(jid_uuid, "completed", chunk_count=len(chunks), completed_at=datetime.utcnow())
-        return {"job_id": jid, "status": "completed", "chunks_added": added}
-
-    try:
-        result = _work(job_id, url)
-        logger.info("Ingestion task completed", extra={"job_id": job_id})
-        return result
-    except Exception as exc:  # pragma: no cover - top-level catch for robustness
+    except Exception as exc:
         tb = traceback.format_exc()
         logger.error("Ingestion task failed", extra={"job_id": job_id, "error": str(exc), "traceback": tb})
 
