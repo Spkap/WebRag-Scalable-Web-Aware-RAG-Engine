@@ -16,9 +16,10 @@ class Settings(BaseSettings):
     # External API keys
     GOOGLE_API_KEY: str = Field(..., env="GOOGLE_API_KEY")
 
-    # Embedding configuration
+    # AI configuration
     EMBEDDING_MODEL: str = Field("gemini-embedding-001", env="EMBEDDING_MODEL")
     EMBEDDING_DIMENSIONS: int = Field(1536, env="EMBEDDING_DIMENSIONS")
+    LLM_MODEL: str = Field("gemini-2.5-flash", env="LLM_MODEL")
 
     # Database and infra
     POSTGRES_USER: str = Field(..., env="POSTGRES_USER")
