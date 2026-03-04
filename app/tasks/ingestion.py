@@ -79,27 +79,7 @@ def process_url_ingestion(self: Task, job_id: str, url: str) -> Dict:
         return {"job_id": jid, "status": "completed", "chunks_added": added}
 
     try:
-        # Run the work in a separate thread to avoid event loop conflicts
-        import threading
-        result = None
-        exception = None
-        
-        def run_work():
-            nonlocal result, exception
-            try:
-                result = _work(job_id, url)
-            except Exception as e:
-                exception = e
-        
-        thread = threading.Thread(target=run_work)
-        thread.start()
-        thread.join(timeout=300)  # 5 minute timeout
-        
-        if thread.is_alive():
-            raise TimeoutError("Ingestion task timed out")
-        if exception:
-            raise exception
-            
+        result = _work(job_id, url)
         logger.info("Ingestion task completed", extra={"job_id": job_id})
         return result
     except Exception as exc:

@@ -106,8 +106,6 @@ async def check_db_health() -> bool:
         return True
     except Exception:
         return False
-    except Exception:
-        return False
 
 
 # ---------------------------------------------------------------------------

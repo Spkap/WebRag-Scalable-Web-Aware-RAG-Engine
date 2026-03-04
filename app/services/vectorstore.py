@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -39,7 +40,7 @@ class QdrantStore:
             logger.info("Creating Qdrant collection", extra={"collection": self.collection_name})
             self.client.create_collection(
                 collection_name=self.collection_name,
-                vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
+                vectors_config=VectorParams(size=settings.EMBEDDING_DIMENSIONS, distance=Distance.COSINE),
             )
 
     def add_documents(self, chunks: List[str], vectors: List[List[float]], metadata: Dict, job_id: str) -> int:
@@ -58,9 +59,7 @@ class QdrantStore:
                 "ingested_at": ingested_at,
                 "title": metadata.get("title") if metadata else None,
             }
-            # Use integer ID based on job_id hash and chunk index for better compatibility
-            job_hash = hash(job_id) % 1000000  # Keep it reasonable size
-            point_id = job_hash * 10000 + idx
+            point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{job_id}-{idx}"))
             points.append(PointStruct(id=point_id, vector=vec, payload=payload))
 
         try:
@@ -124,7 +123,7 @@ def ensure_qdrant_collection(collection_name: str | None = None) -> None:
                 # Collection doesn't exist, try to create it
                 try:
                     logger.info("Creating Qdrant collection", extra={"collection": collection})
-                    client.create_collection(collection_name=collection, vectors_config=VectorParams(size=1536, distance=Distance.COSINE))
+                    client.create_collection(collection_name=collection, vectors_config=VectorParams(size=settings.EMBEDDING_DIMENSIONS, distance=Distance.COSINE))
                     logger.info("Qdrant collection created successfully", extra={"collection": collection})
                 except Exception as create_exc:
                     # Check if it's just "already exists" error, which is fine

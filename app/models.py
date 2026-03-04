@@ -4,7 +4,6 @@ from datetime import datetime
 from typing import Any
 from typing import Dict, List, Optional
 from uuid import UUID
-from datetime import datetime
 
 from pydantic import BaseModel, Field, HttpUrl
 
@@ -91,7 +90,7 @@ class IngestURLResponse(BaseModel):
 
 class SourceChunk(BaseModel):
     text: str
-    source_url: str
+    source_url: Optional[str]
     relevance_score: float
 
 
