@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import Any, Dict
 from datetime import datetime
 from uuid import UUID
 
 from fastapi import (
     FastAPI,
-    Depends,
     HTTPException,
     Request,
     status as http_status,
@@ -16,12 +16,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 
 import redis as redis_lib
+import time
 from qdrant_client import QdrantClient
 
 from .config import settings
-import time
-from fastapi import status
-from sqlalchemy.ext.asyncio import AsyncSession
 from .services.embeddings import GeminiEmbeddings
 from .services.vectorstore import QdrantStore
 from .services.llm import GeminiLLM
@@ -37,21 +35,52 @@ from .models import (
     SourceChunk,
 )
 from .database import (
-    get_db_session,
     create_job,
     update_job_status,
     get_job_by_id,
     check_db_health,
 )
-from .utils.validators import is_valid_url, sanitize_text
+from .utils.validators import is_valid_url
 
 logger = get_logger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize shared RAG services once on startup; clean up on shutdown."""
+    logger.info("Starting WebRAG API", extra={"port": settings.API_PORT})
+
+    # Instantiate services once — reused across all requests (no per-request overhead)
+    app.state.embedder = GeminiEmbeddings(
+        api_key=settings.GOOGLE_API_KEY,
+        model=settings.EMBEDDING_MODEL,
+        output_dimensionality=settings.EMBEDDING_DIMENSIONS,
+    )
+    app.state.vectorstore = QdrantStore(
+        host=settings.QDRANT_HOST,
+        port=settings.QDRANT_PORT,
+        collection_name=settings.QDRANT_COLLECTION,
+    )
+    app.state.llm = GeminiLLM(api_key=settings.GOOGLE_API_KEY, model="gemini-2.5-flash")
+
+    # Ensure Qdrant collection exists (sync client wrapped in threadpool)
+    try:
+        from .services.vectorstore import ensure_qdrant_collection
+        await run_in_threadpool(ensure_qdrant_collection)
+        logger.info("Qdrant collection ensured")
+    except Exception as exc:
+        logger.warning("Failed to ensure Qdrant collection on startup", extra={"error": str(exc)})
+
+    yield  # Application runs here
+
+    logger.info("WebRAG API shutting down")
 
 
 app = FastAPI(
     title="WebRAG API",
     version="1.0.0",
     description="Scalable Web-Aware RAG Engine",
+    lifespan=lifespan,
 )
 
 
@@ -78,28 +107,6 @@ async def log_requests(request: Request, call_next):
     duration = (datetime.utcnow() - start).total_seconds()
     logger.info("request complete", extra={"method": request.method, "path": request.url.path, "status_code": response.status_code, "duration": duration})
     return response
-
-
-@app.on_event("startup")
-async def startup_event() -> None:
-    """Application startup tasks: ensure Qdrant collection exists and log startup."""
-    logger.info("Starting WebRAG API", extra={"port": settings.API_PORT})
-    # Ensure Qdrant collection exists (run in threadpool because qdrant-client is sync)
-    try:
-        # Construct client with compatibility check disabled to avoid startup
-        # failing when client/server minor versions differ in dev setups.
-        try:
-            await run_in_threadpool(lambda: QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT, check_compatibility=False))
-        except TypeError:
-            # Older qdrant-client versions may not accept the flag
-            await run_in_threadpool(lambda: QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT))
-        # Use the vectorstore helper if present to create the collection
-        from .services.vectorstore import ensure_qdrant_collection
-
-        await run_in_threadpool(ensure_qdrant_collection)
-        logger.info("Qdrant collection ensured")
-    except Exception as exc:
-        logger.warning("Failed to ensure Qdrant collection on startup", extra={"error": str(exc)})
 
 
 @app.get("/", status_code=http_status.HTTP_200_OK)
@@ -142,10 +149,10 @@ async def ingest_url(request: IngestURLRequest) -> IngestURLResponse:
     return IngestURLResponse(job_id=job.id, status=job.status, message="Job accepted", estimated_time_seconds=30)
 
 
-@app.post("/query", response_model=QueryResponse, status_code=status.HTTP_200_OK)
+@app.post("/query", response_model=QueryResponse, status_code=http_status.HTTP_200_OK)
 async def query_knowledge_base(
-    request: QueryRequest,
-    db: AsyncSession = Depends(get_db_session),
+    body: QueryRequest,
+    http_request: Request,
 ) -> QueryResponse:
     """Query the ingested knowledge base using a RAG pipeline.
 
@@ -156,8 +163,8 @@ async def query_knowledge_base(
     4. Returns grounded answer with source attribution
 
     Args:
-        request: QueryRequest containing question, optional top_k and filters
-        db: Database session dependency
+        body: QueryRequest containing question, optional top_k and filters
+        http_request: FastAPI Request (used to access shared app.state services)
 
     Returns:
         QueryResponse with answer, sources list, and metadata
@@ -168,59 +175,54 @@ async def query_knowledge_base(
         HTTPException 500: Internal processing errors (embedding, search, LLM)
     """
     start_time = time.time()
-    logger.info(f"Query received: '{request.question[:100]}...'")
+    logger.info("Query received", extra={"question_preview": body.question[:100]})
 
     try:
-        logger.info("Initializing RAG services...")
+        # Reuse singleton services initialised at startup — no per-request construction overhead
+        embedder = http_request.app.state.embedder
+        vectorstore = http_request.app.state.vectorstore
+        llm = http_request.app.state.llm
 
-        embedder = GeminiEmbeddings(api_key=settings.GOOGLE_API_KEY, model=settings.EMBEDDING_MODEL, output_dimensionality=settings.EMBEDDING_DIMENSIONS)
-
-        vectorstore = QdrantStore(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT, collection_name=settings.QDRANT_COLLECTION)
-
-        llm = GeminiLLM(api_key=settings.GOOGLE_API_KEY, model="gemini-2.5-flash")
-
-        logger.info("All RAG services initialized successfully")
-
-        # STEP 2: EMBED USER QUESTION
+        # STEP 1: EMBED USER QUESTION
         try:
-            query_vector = embedder.embed_query(request.question)
+            query_vector = embedder.embed_query(body.question)
         except Exception as e:
-            logger.error(f"Embedding failed: {str(e)}")
+            logger.error("Embedding failed", extra={"error": str(e)})
             raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to embed question: {str(e)}")
 
-        # Validate vector dimension (Gemini must return 1536-dim)
-        if not query_vector or len(query_vector) != 1536:
-            logger.error(f"Invalid embedding dimension: {len(query_vector) if query_vector else 0}, expected 1536")
+        # Validate vector dimension
+        if not query_vector or len(query_vector) != settings.EMBEDDING_DIMENSIONS:
+            logger.error("Invalid embedding dimension", extra={"got": len(query_vector) if query_vector else 0, "expected": settings.EMBEDDING_DIMENSIONS})
             raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Embedding service returned invalid dimension")
 
-        logger.info(f"Query embedded successfully (dimension: {len(query_vector)})")
+        logger.info("Query embedded", extra={"dimension": len(query_vector)})
 
-        # STEP 3: SEARCH QDRANT FOR SIMILAR CHUNKS
+        # STEP 2: SEARCH QDRANT FOR SIMILAR CHUNKS
         try:
-            search_results = vectorstore.search(query_vector=query_vector, top_k=request.top_k, filters=request.filters)
+            search_results = vectorstore.search(query_vector=query_vector, top_k=body.top_k, filters=body.filters)
         except Exception as e:
-            logger.error(f"Vector search failed: {str(e)}")
+            logger.error("Vector search failed", extra={"error": str(e)})
             raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Vector database search failed: {str(e)}")
 
         if not search_results:
             logger.warning("No documents found in vector database")
             raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="No relevant documents found. Please ingest URLs first using POST /ingest-url")
 
-        logger.info(f"Retrieved {len(search_results)} chunks from Qdrant")
+        logger.info("Chunks retrieved", extra={"count": len(search_results)})
 
-        # STEP 4: GENERATE ANSWER USING GEMINI
+        # STEP 3: GENERATE ANSWER USING GEMINI
         try:
-            answer = llm.generate_answer(question=request.question, context_chunks=search_results)
+            answer = llm.generate_answer(question=body.question, context_chunks=search_results)
         except ValueError as e:
-            logger.error(f"LLM generation error: {str(e)}")
+            logger.error("LLM generation error", extra={"error": str(e)})
             raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Answer generation failed: {str(e)}")
         except Exception as e:
-            logger.error(f"Unexpected LLM error: {str(e)}", exc_info=True)
+            logger.error("Unexpected LLM error", extra={"error": str(e)}, exc_info=True)
             raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to generate answer due to internal error")
 
-        logger.info(f"Answer generated successfully (length: {len(answer)} chars)")
+        logger.info("Answer generated", extra={"answer_length": len(answer)})
 
-        # STEP 5: FORMAT RESPONSE WITH SOURCES
+        # STEP 4: FORMAT RESPONSE WITH SOURCES
         sources = []
         for result in search_results:
             txt = result.get('text') or ""
@@ -239,9 +241,9 @@ async def query_knowledge_base(
         metadata = {
             "chunks_retrieved": len(search_results),
             "processing_time_ms": processing_time_ms,
-            "embedding_model": "gemini-embedding-001",
+            "embedding_model": settings.EMBEDDING_MODEL,
             "llm_model": "gemini-2.5-flash",
-            "top_k": request.top_k,
+            "top_k": body.top_k,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
 
@@ -251,13 +253,13 @@ async def query_knowledge_base(
 
         response = QueryResponse(answer=answer, sources=source_objs, metadata=metadata)
 
-        logger.info(f"Query completed successfully in {processing_time_ms}ms")
+        logger.info("Query completed", extra={"processing_time_ms": processing_time_ms})
         return response
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Unexpected query pipeline error: {str(e)}", exc_info=True)
+        logger.error("Unexpected query pipeline error", extra={"error": str(e)}, exc_info=True)
         raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Query processing failed: {str(e)}")
 
 
@@ -307,7 +309,6 @@ async def health() -> HealthResponse:
     try:
         def _qdrant_check() -> bool:
             client = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
-            # try to list collections (lightweight check)
             _ = client.get_collections()
             return True
 

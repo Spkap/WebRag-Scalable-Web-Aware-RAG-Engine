@@ -1,17 +1,35 @@
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
-celery[redis]>=5.3.4
-redis>=5.0.0
-sqlalchemy>=2.0.0
-psycopg2-binary>=2.9.9
-qdrant-client>=1.7.0
-pydantic>=2.5.0
-pydantic-settings>=2.1.0
-python-dotenv>=1.0.0
-google-generativeai>=0.8.0
-google-genai>=0.8.0
-langchain-text-splitters>=0.0.1
-beautifulsoup4>=4.12.0
-requests>=2.31.0
-lxml>=4.9.0
-asyncpg>=0.28.0
+# WebRAG dependencies — pinned to resolved stable versions as of 2026-03-04
+# To update: uv pip install -r requirements.txt --upgrade, then freeze again
+
+# API framework
+fastapi==0.135.1
+uvicorn[standard]==0.41.0
+
+# Task queue
+# Note: celery[redis] extra pins redis<6.0.0; redis 5.3.1 is the resolved compatible version
+celery[redis]==5.5.2
+redis==5.3.1
+
+# Database (async engine for FastAPI + sync psycopg2 for Celery workers)
+sqlalchemy==2.0.48
+psycopg2-binary==2.9.11
+asyncpg==0.31.0
+
+# Vector store
+qdrant-client==1.17.0
+
+# Validation & settings
+pydantic==2.12.5
+pydantic-settings==2.13.1
+python-dotenv==1.2.2
+
+# Google AI — unified SDK (google-generativeai is officially deprecated)
+google-genai==1.65.0
+
+# Text processing
+langchain-text-splitters==1.1.1
+beautifulsoup4==4.14.3
+lxml==6.0.2
+
+# HTTP
+requests==2.32.5

@@ -1,94 +1,97 @@
-# API Endpoints Reference
+# API Reference
 
-This document provides comprehensive examples for testing all WebRAG API endpoints using curl.
+Complete endpoint reference for the WebRAG API. All examples use `curl` + `jq`.
+
+**Base URL**: `http://localhost:8000` (when running via Docker Compose)
+
+---
 
 ## Table of Contents
 
 - [Health Check](#health-check)
-- [URL Ingestion](#url-ingestion)
+- [Ingest URL](#ingest-url)
 - [Job Status](#job-status)
-- [Knowledge Base Query](#knowledge-base-query)
-- [Error Handling](#error-handling)
-- [Advanced Usage](#advanced-usage)
+- [Query](#query)
+- [Error Responses](#error-responses)
+- [Scripts](#scripts)
 
 ---
 
 ## Health Check
 
-Verify system health and service connectivity.
-
-### Basic Health Check
+Check connectivity to all system components.
 
 ```bash
 curl -sS http://localhost:8000/health | jq .
 ```
 
-**Expected Response:**
+**Response `200 OK`:**
 
 ```json
 {
-  "status": "healthy",
+  "status": "ok",
   "services": {
-    "postgres": "connected",
-    "redis": "connected",
-    "qdrant": "connected",
-    "celery_workers": 2
-  }
+    "postgres": {"ok": true},
+    "redis":    {"ok": true},
+    "qdrant":   {"ok": true},
+    "celery":   {"ok": true, "workers": ["celery@worker1", "celery@worker2"]}
+  },
+  "timestamp": "2026-03-04T13:45:00Z",
+  "version": "1.0.0"
 }
 ```
 
+`status` is `"ok"` when all components are reachable, `"degraded"` otherwise.
+
 ---
 
-## URL Ingestion
+## Ingest URL
 
-Submit URLs for asynchronous processing and embedding.
+Submit a URL for asynchronous ingestion. Returns immediately (`202 Accepted`) — processing happens in the background.
 
-### Basic Ingestion
+### Basic
 
 ```bash
-curl -X POST "http://localhost:8000/ingest-url" \
+curl -sS -X POST http://localhost:8000/ingest-url \
   -H "Content-Type: application/json" \
-  -d '{"url":"https://en.wikipedia.org/wiki/Retrieval-augmented_generation"}'
+  -d '{"url": "https://en.wikipedia.org/wiki/Retrieval-augmented_generation"}' | jq .
 ```
 
-**Response (202 Accepted):**
+### With Metadata
+
+```bash
+curl -sS -X POST http://localhost:8000/ingest-url \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://ai.google.dev/gemini-api/docs/embeddings",
+    "metadata": {
+      "source": "official-docs",
+      "category": "embeddings"
+    }
+  }' | jq .
+```
+
+**Response `202 Accepted`:**
 
 ```json
 {
   "job_id": "550e8400-e29b-41d4-a716-446655440000",
   "status": "pending",
-  "message": "URL queued for processing"
+  "message": "Job accepted",
+  "estimated_time_seconds": 30
 }
 ```
 
-### Ingestion with Custom Metadata
+Save `job_id` to track progress.
+
+### Capture Job ID
 
 ```bash
-curl -X POST "http://localhost:8000/ingest-url" \
+JOB=$(curl -sS -X POST http://localhost:8000/ingest-url \
   -H "Content-Type: application/json" \
-  -d '{
-    "url": "https://ai.google.dev/gemini-api/docs/embeddings",
-    "metadata": {
-      "source": "documentation",
-      "category": "embeddings",
-      "priority": "high"
-    }
-  }'
-```
+  -d '{"url": "https://en.wikipedia.org/wiki/Artificial_intelligence"}')
 
-### Capturing Job ID for Tracking
-
-```bash
-# Store response in variable
-JOB_JSON=$(curl -sS -X POST "http://localhost:8000/ingest-url" \
-  -H "Content-Type: application/json" \
-  -d '{"url":"https://en.wikipedia.org/wiki/Artificial_intelligence"}')
-
-# Display response
-echo "$JOB_JSON" | jq .
-
-# Extract job_id
-JOB_ID=$(echo "$JOB_JSON" | jq -r '.job_id')
+JOB_ID=$(echo $JOB | jq -r '.job_id')
 echo "Job ID: $JOB_ID"
 ```
 
@@ -96,141 +99,101 @@ echo "Job ID: $JOB_ID"
 
 ## Job Status
 
-Monitor ingestion job progress and completion.
-
-### Check Status (Manual)
-
-Replace `<JOB_ID>` with your actual job identifier:
+Monitor ingestion progress.
 
 ```bash
-curl http://localhost:8000/status/<JOB_ID>
+curl -sS http://localhost:8000/status/$JOB_ID | jq .
 ```
 
-### Check Status (Using Variable)
+**Status values:**
 
-If you captured `JOB_ID` in a variable:
+| Status | Meaning |
+|--------|---------|
+| `pending` | Queued, not yet picked up by a worker |
+| `processing` | Worker is actively fetching/embedding |
+| `completed` | All chunks stored in Qdrant |
+| `failed` | Unrecoverable error — see `error_message` |
 
-```bash
-curl -sS "http://localhost:8000/status/${JOB_ID}" | jq .
-```
+**Completed response:**
 
-### Response Examples
-
-**Pending:**
-```json
-{
-  "job_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "pending",
-  "chunk_count": 0,
-  "processed_chunks": 0
-}
-```
-
-**Processing:**
-```json
-{
-  "job_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "processing",
-  "chunk_count": 18,
-  "processed_chunks": 12
-}
-```
-
-**Completed:**
 ```json
 {
   "job_id": "550e8400-e29b-41d4-a716-446655440000",
   "status": "completed",
+  "url": "https://en.wikipedia.org/wiki/...",
   "chunk_count": 18,
-  "processed_chunks": 18,
-  "processing_time_seconds": 35.4
+  "processing_time_seconds": 35.4,
+  "created_at": "2026-03-04T13:44:00Z",
+  "completed_at": "2026-03-04T13:44:35Z"
 }
 ```
 
-**Failed:**
+**Failed response:**
+
 ```json
 {
   "job_id": "550e8400-e29b-41d4-a716-446655440000",
   "status": "failed",
-  "error": "Failed to fetch URL: Connection timeout"
+  "error_message": "Failed to fetch URL: Connection timeout"
 }
 ```
 
-### Polling Until Completion
-
-Bash script to monitor job status:
+### Poll Until Done
 
 ```bash
 while true; do
-  STATUS=$(curl -sS "http://localhost:8000/status/${JOB_ID}" | jq -r '.status')
-  echo "$(date +%T) Status: $STATUS"
-  
-  if [ "$STATUS" = "completed" ] || [ "$STATUS" = "failed" ]; then
-    echo "Job finished with status: $STATUS"
-    break
-  fi
-  
-  sleep 2
+  STATUS=$(curl -sS http://localhost:8000/status/$JOB_ID | jq -r '.status')
+  echo "$(date +%T) — $STATUS"
+  [ "$STATUS" = "completed" ] || [ "$STATUS" = "failed" ] && break
+  sleep 3
 done
 ```
 
 ---
 
-## Knowledge Base Query
+## Query
 
-Query the embedded documents using natural language.
+Search the knowledge base with a natural language question.
 
 ### Basic Query
 
 ```bash
-curl -X POST "http://localhost:8000/query" \
+curl -sS -X POST http://localhost:8000/query \
   -H "Content-Type: application/json" \
   -d '{
-    "question": "What is retrieval augmented generation?",
-    "top_k": 5
-  }'
-```
-
-### Query with JSON Formatting
-
-```bash
-curl -sS -X POST "http://localhost:8000/query" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "question": "What is retrieval augmented generation?",
+    "question": "What is retrieval-augmented generation?",
     "top_k": 5
   }' | jq .
 ```
 
-**Response Structure:**
+**Response `200 OK`:**
 
 ```json
 {
-  "answer": "Retrieval Augmented Generation (RAG) is a technique that combines information retrieval with text generation to produce factually grounded responses...",
+  "answer": "Retrieval-Augmented Generation (RAG) is a technique that...",
   "sources": [
     {
-      "text": "RAG systems retrieve relevant documents from a knowledge base to provide context for language model generation...",
+      "text": "RAG systems retrieve relevant documents from a knowledge base...",
       "source_url": "https://en.wikipedia.org/wiki/Retrieval-augmented_generation",
-      "relevance_score": 0.8934,
-      "chunk_index": 3
+      "relevance_score": 0.8934
     }
   ],
   "metadata": {
-    "embedding_model": "gemini-embedding-001",
-    "embedding_dimensions": 1536,
-    "llm_model": "gemini-2.5-flash",
+    "chunks_retrieved": 5,
     "processing_time_ms": 1240,
-    "chunks_retrieved": 5
+    "embedding_model": "gemini-embedding-001",
+    "llm_model": "gemini-2.5-flash",
+    "top_k": 5
   }
 }
 ```
 
-### Query with Source Filtering
+### With Source Filter
 
-Filter results by specific source URL:
+Restrict retrieval to a specific URL:
 
 ```bash
-curl -sS -X POST "http://localhost:8000/query" \
+curl -sS -X POST http://localhost:8000/query \
   -H "Content-Type: application/json" \
   -d '{
     "question": "What is RAG?",
@@ -241,258 +204,134 @@ curl -sS -X POST "http://localhost:8000/query" \
   }' | jq .
 ```
 
-### Query with Custom Metadata Filters
-
-Filter by custom metadata fields:
+### Extract Just the Answer
 
 ```bash
-curl -sS -X POST "http://localhost:8000/query" \
+curl -sS -X POST http://localhost:8000/query \
   -H "Content-Type: application/json" \
-  -d '{
-    "question": "How do embeddings work?",
-    "top_k": 5,
-    "filters": {
-      "metadata.category": "embeddings",
-      "metadata.priority": "high"
-    }
-  }' | jq .
-```
-
-### Advanced Query Options
-
-```bash
-curl -sS -X POST "http://localhost:8000/query" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "question": "Explain the benefits of RAG systems",
-    "top_k": 10,
-    "min_score": 0.75,
-    "include_metadata": true
-  }' | jq .
+  -d '{"question": "What is machine learning?", "top_k": 5}' | jq -r '.answer'
 ```
 
 ---
 
-## Error Handling
+## Error Responses
 
-### Invalid URL Format
+### 400 — Invalid URL
 
 ```bash
-curl -i -X POST "http://localhost:8000/ingest-url" \
+curl -i -X POST http://localhost:8000/ingest-url \
   -H "Content-Type: application/json" \
-  -d '{"url":"not-a-valid-url"}'
+  -d '{"url": "not-a-url"}'
 ```
-
-**Response (400 Bad Request):**
 
 ```json
-{
-  "detail": "Invalid URL format"
-}
+{"detail": "Invalid URL provided"}
 ```
 
-### Empty URL
+### 404 — No Documents Found
 
-```bash
-curl -i -X POST "http://localhost:8000/ingest-url" \
-  -H "Content-Type: application/json" \
-  -d '{"url":""}'
-```
-
-**Response (422 Unprocessable Entity):**
+Returned by `/query` when the knowledge base is empty:
 
 ```json
-{
-  "detail": [
-    {
-      "loc": ["body", "url"],
-      "msg": "URL cannot be empty",
-      "type": "value_error"
-    }
-  ]
-}
+{"detail": "No relevant documents found. Please ingest URLs first using POST /ingest-url"}
 ```
 
-### Empty Query Question
+### 404 — Job Not Found
 
 ```bash
-curl -i -X POST "http://localhost:8000/query" \
-  -H "Content-Type: application/json" \
-  -d '{"question":""}'
+curl -i http://localhost:8000/status/00000000-0000-0000-0000-000000000000
 ```
 
-**Response (422 Unprocessable Entity):**
+```json
+{"detail": "Job not found"}
+```
+
+### 422 — Validation Error
+
+Pydantic model validation failure (e.g. missing field):
 
 ```json
 {
   "detail": [
     {
       "loc": ["body", "question"],
-      "msg": "Question cannot be empty",
-      "type": "value_error"
+      "msg": "Field required",
+      "type": "missing"
     }
   ]
 }
 ```
 
-### Nonexistent Job ID
-
-```bash
-curl -i "http://localhost:8000/status/00000000-0000-0000-0000-000000000000"
-```
-
-**Response (404 Not Found):**
-
-```json
-{
-  "detail": "Job not found"
-}
-```
-
 ---
 
-## Advanced Usage
+## Scripts
 
-### Interactive API Documentation
-
-Access Swagger UI for interactive testing:
+### Ingest Multiple URLs
 
 ```bash
-# macOS
-open "http://localhost:8000/docs"
-
-# Linux
-xdg-open "http://localhost:8000/docs"
-
-# Windows (WSL)
-explorer.exe "http://localhost:8000/docs"
-```
-
-Alternative documentation format (ReDoc):
-
-```bash
-open "http://localhost:8000/redoc"
-```
-
-### Batch Testing Script
-
-Save as `test_api.sh`:
-
-```bash
-#!/bin/bash
-set -e
-
-API_URL="http://localhost:8000"
-
-echo "Testing WebRAG API"
-echo "=================="
-
-# Health Check
-echo "\n1. Health Check"
-curl -sS "$API_URL/health" | jq .
-
-# Ingest URL
-echo "\n2. Ingesting URL"
-JOB_JSON=$(curl -sS -X POST "$API_URL/ingest-url" \
-  -H "Content-Type: application/json" \
-  -d '{"url":"https://en.wikipedia.org/wiki/Artificial_intelligence"}')
-JOB_ID=$(echo "$JOB_JSON" | jq -r '.job_id')
-echo "Job ID: $JOB_ID"
-
-# Wait for completion
-echo "\n3. Waiting for job completion"
-MAX_WAIT=120
-ELAPSED=0
-
-while [ $ELAPSED -lt $MAX_WAIT ]; do
-  STATUS=$(curl -sS "$API_URL/status/$JOB_ID" | jq -r '.status')
-  echo "  [$ELAPSED s] Status: $STATUS"
-  
-  if [ "$STATUS" = "completed" ]; then
-    echo "Job completed successfully"
-    break
-  elif [ "$STATUS" = "failed" ]; then
-    echo "Job failed"
-    exit 1
-  fi
-  
-  sleep 5
-  ELAPSED=$((ELAPSED + 5))
-done
-
-# Query knowledge base
-echo "\n4. Querying knowledge base"
-ANSWER=$(curl -sS -X POST "$API_URL/query" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "question": "What is artificial intelligence?",
-    "top_k": 3
-  }' | jq -r '.answer')
-
-echo "Answer: $ANSWER"
-echo "\nAll tests completed successfully"
-```
-
-Make executable and run:
-
-```bash
-chmod +x test_api.sh
-./test_api.sh
-```
-
-### Monitoring Logs
-
-Real-time log monitoring:
-
-```bash
-# All services
-docker compose -f docker/docker-compose.yml logs -f
-
-# API service only
-docker compose -f docker/docker-compose.yml logs -f api
-
-# Workers only
-docker compose -f docker/docker-compose.yml logs -f worker
-
-# Specific container
-docker logs -f webrag_worker_1
-```
-
-### Multiple Document Ingestion
-
-Ingest multiple documents sequentially:
-
-```bash
-# Array of URLs
 URLS=(
   "https://en.wikipedia.org/wiki/Artificial_intelligence"
   "https://en.wikipedia.org/wiki/Machine_learning"
   "https://en.wikipedia.org/wiki/Natural_language_processing"
 )
 
-# Ingest each URL
 for url in "${URLS[@]}"; do
   echo "Ingesting: $url"
-  curl -sS -X POST "http://localhost:8000/ingest-url" \
+  curl -sS -X POST http://localhost:8000/ingest-url \
     -H "Content-Type: application/json" \
-    -d "{\"url\":\"$url\"}" | jq .
+    -d "{\"url\":\"$url\"}" | jq '{job_id, status}'
   sleep 1
 done
 ```
 
----
+### End-to-End Test Script
 
-## Related Documentation
+Save as `scripts/test_api.sh`:
 
-- [README.md](../README.md) - Project overview and architecture
-- [SETUP.md](./SETUP.md) - Deployment and configuration guide
+```bash
+#!/bin/bash
+set -e
+
+API="http://localhost:8000"
+
+echo "=== 1. Health Check ==="
+curl -sS $API/health | jq .status
+
+echo "=== 2. Ingest URL ==="
+JOB=$(curl -sS -X POST $API/ingest-url \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://en.wikipedia.org/wiki/Artificial_intelligence"}')
+JOB_ID=$(echo $JOB | jq -r '.job_id')
+echo "Job ID: $JOB_ID"
+
+echo "=== 3. Poll Until Completed ==="
+for i in $(seq 1 24); do
+  STATUS=$(curl -sS $API/status/$JOB_ID | jq -r '.status')
+  echo "  [${i}] $STATUS"
+  [ "$STATUS" = "completed" ] && break
+  [ "$STATUS" = "failed" ] && { echo "FAILED"; exit 1; }
+  sleep 5
+done
+
+echo "=== 4. Query ==="
+curl -sS -X POST $API/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is artificial intelligence?", "top_k": 3}' \
+  | jq '{answer, source_count: (.sources | length), processing_time_ms: .metadata.processing_time_ms}'
+
+echo "=== Done ==="
+```
+
+```bash
+chmod +x scripts/test_api.sh
+./scripts/test_api.sh
+```
 
 ---
 
 ## Notes
 
-- **Port Configuration**: All examples use port `8000`. Modify if you changed the port in `docker-compose.yml`
-- **jq Requirement**: JSON formatting requires `jq`. Install via package manager if not available
-- **Job IDs**: All job identifiers are UUIDs. Save them for status tracking
-- **API Quotas**: Monitor Google AI API usage to avoid quota exhaustion
-- **Rate Limiting**: Consider implementing rate limits for production deployments
+- All job IDs are UUIDs — save them for status polling
+- `top_k` defaults to 5 if omitted
+- The `sources[].text` field is truncated to 300 characters in the response
+- Swagger UI with full schema explorer: http://localhost:8000/docs
