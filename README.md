@@ -41,8 +41,8 @@
 ### Setup
 
 ```bash
-git clone <repository-url>
-cd webrag
+git clone https://github.com/Spkap/WebRag-Scalable-Web-Aware-RAG-Engine
+cd WebRag-Scalable-Web-Aware-RAG-Engine
 
 cp .env.example .env
 # Add your GOOGLE_API_KEY to .env
