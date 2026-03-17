@@ -41,7 +41,7 @@
 ### Setup
 
 ```bash
-git clone https://github.com/Spkap/WebRag-Scalable-Web-Aware-RAG-Engine
+git clone https://github.com/Spkap/WebRag-Scalable-Web-Aware-RAG-Engine.git
 cd WebRag-Scalable-Web-Aware-RAG-Engine
 
 cp .env.example .env
